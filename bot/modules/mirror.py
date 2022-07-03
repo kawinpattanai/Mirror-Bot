@@ -101,13 +101,13 @@ class MirrorListener(listeners.MirrorListeners):
             if name is None:  # when pyrogram's media.file_name is of NoneType
                 name = os.listdir(f"{DOWNLOAD_DIR}{self.uid}")[0]
             m_path = f"{DOWNLOAD_DIR}{self.uid}/{name}"
-        if self.isZip or self.isTar :
+        if self.isZip or self.isTar:
             try:
                 with download_dict_lock:
                     download_dict[self.uid] = TarStatus(name, m_path, size)
-                if self.isZip :
+                if self.isZip:
                     pswd = self.pswd
-                    path = m_path + ".zip"
+                    path = f"{m_path}.zip"
                     LOGGER.info(f'Zip: orig_path: {m_path}, zip_path: {path}')
                     if pswd is not None:
                         subprocess.run(["7z", "a", "-mx=0", f"-p{pswd}", path, m_path])
@@ -131,10 +131,12 @@ class MirrorListener(listeners.MirrorListeners):
                 with download_dict_lock:
                     download_dict[self.uid] = ExtractStatus(name, m_path, size)
                 pswd = self.pswd
-                if pswd is not None:
-                    archive_result = subprocess.run(["pextract", m_path, pswd])
-                else:
-                    archive_result = subprocess.run(["extract", m_path])
+                archive_result = (
+                    subprocess.run(["pextract", m_path, pswd])
+                    if pswd is not None
+                    else subprocess.run(["extract", m_path])
+                )
+
                 if archive_result.returncode == 0:
                     threading.Thread(target=os.remove, args=(m_path,)).start()
                     LOGGER.info(f"Deleting archive : {m_path}")
@@ -390,19 +392,29 @@ def _mirror(bot, update,isTar=False, isZip=False, extract=False, isLeech=False):
     link = link.strip()
     reply_to = update.message.reply_to_message
     if reply_to is not None:
-        file = None
         media_array = [reply_to.document, reply_to.video, reply_to.audio]
-        for i in media_array:
-            if i is not None:
-                file = i
-                break
-
+        file = next((i for i in media_array if i is not None), None)
         if (
             not bot_utils.is_url(link)
             and not bot_utils.is_magnet(link)
             or len(link) == 0
-        ) and file is not None:
-            if file.mime_type != "application/x-bittorrent":
+        ):
+            if file is None:
+                reply_text = reply_to.text
+                reply_text = re.split('\n ', reply_text)[0]
+                if bot_utils.is_url(reply_text) or bot_utils.is_magnet(reply_text):
+                    link = reply_text
+
+                if not bot_utils.is_url(link) and not bot_utils.is_magnet(link) and not os.path.exists(link):
+                    resp = requests.get(link)
+                    if resp.status_code == 200:
+                        file_name = str(time.time()).replace(".", "") + ".torrent"
+                        open(file_name, "wb").write(resp.content)
+                        link = f"{file_name}"
+                    else:
+                        sendMessage(f"ERROR: link got HTTP response:{resp.status_code}", bot, update)
+                        return
+            elif file.mime_type != "application/x-bittorrent":
                 listener = MirrorListener(bot, update, isTar, isZip, extract, isLeech=isLeech, pswd=pswd)
                 tg_downloader = TelegramDownloadHelper(listener)
                 ms = update.message
@@ -417,25 +429,6 @@ def _mirror(bot, update,isTar=False, isZip=False, extract=False, isLeech=False):
                 return
             else:
                 link = file.get_file().file_path
-        elif (
-              not bot_utils.is_url(link)
-              and not bot_utils.is_magnet(link)
-              or len(link) == 0
-        ) and file is None:
-            reply_text = reply_to.text
-            reply_text = re.split('\n ', reply_text)[0]
-            if bot_utils.is_url(reply_text) or bot_utils.is_magnet(reply_text):
-                link = reply_text
-
-            if not bot_utils.is_url(link) and not bot_utils.is_magnet(link) and not os.path.exists(link) :
-                resp = requests.get(link)
-                if resp.status_code == 200:
-                    file_name = str(time.time()).replace(".", "") + ".torrent"
-                    open(file_name, "wb").write(resp.content)
-                    link = f"{file_name}"
-                else:
-                    sendMessage("ERROR: link got HTTP response:" + resp.status_code, bot, update)
-                    return
     elif not bot_utils.is_url(link) and not bot_utils.is_magnet(link):
         sendMessage("No download source provided", bot, update)
         return
@@ -449,7 +442,7 @@ def _mirror(bot, update,isTar=False, isZip=False, extract=False, isLeech=False):
                 return
         if "Youtube" in str(e):
                 sendMessage(f"{e}", bot, update)
-                return    
+                return
     listener = MirrorListener(bot, update, isTar, isZip, extract, isLeech, pswd)
     if bot_utils.is_gdrive_link(link):
         if not isZip and not isTar and not extract and not isLeech:
